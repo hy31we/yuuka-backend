@@ -222,16 +222,17 @@ async def reload_knowledge(interaction: discord.Interaction):
     load_knowledge_base()
     await interaction.followup.send(f"지식 파일들을 새로고침했어요! ({len(knowledge_cache)}개 파일 로드됨)")
 
-# 메시지 수신 이벤트
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ===================== 수정된 코드 블록 =====================
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 @bot.event
 async def on_message(message):
     if message.author == bot.user or not message.guild:
         return
 
-    # 환경변수에서 최신 채널 ID를 읽어옴
     current_channel_id = int(os.getenv("CHANNEL_ID", "0"))
     if message.channel.id != current_channel_id:
-        return  # 지정된 채널 외에는 무시
+        return
 
     if not connected_clients:
         await message.channel.send("앗, 선생님. 웹페이지와 연결되어 있지 않아요. index.html을 열어주세요!")
@@ -247,7 +248,6 @@ async def on_message(message):
         user_nickname = message.author.display_name
         user_message = message.content.strip()
         
-        # 텍스트 메시지와 첨부 파일이 모두 없는 경우 무시
         if not user_message and not message.attachments:
             return
         
@@ -258,7 +258,6 @@ async def on_message(message):
             for file_name, content in knowledge_cache.items():
                 if isinstance(content, str):
                     knowledge_text_context += f"\n[파일: {file_name}]\n{content}\n"
-                # 이미지 파일은 프롬프트에 직접 추가
                 elif isinstance(content, Image.Image):
                     prompt_parts.append(content)
             knowledge_text_context += "--- 끝 ---\n\n"
@@ -266,7 +265,6 @@ async def on_message(message):
         full_text_prompt = f"{knowledge_text_context}내 이름은 '{user_nickname}'이야.\n\n{user_message}"
         prompt_parts.insert(0, full_text_prompt)
 
-        # 사용자가 올린 이미지 첨부파일 처리
         for attachment in message.attachments:
             if attachment.content_type and attachment.content_type.startswith('image/'):
                 try:
@@ -279,35 +277,46 @@ async def on_message(message):
 
         async with message.channel.typing():
             try:
-                # 비동기 스레드에서 Gemini API 호출
                 response = await asyncio.to_thread(current_session.send_message, prompt_parts)
                 raw_response = response.text
-                
-                # 응답에서 JSON 블록 추출 시도
-                try:
-                    # 마크다운 JSON 블록(` ```json `)을 고려한 파싱
-                    json_start = raw_response.find('{')
-                    json_end = raw_response.rfind('}') + 1
-                    if json_start != -1 and json_end != 0:
-                        json_str = raw_response[json_start:json_end]
-                        gemini_data = json.loads(json_str)
-                        dialogue_text = gemini_data.get("text", "...")
-                        emotion_key = gemini_data.get("emotion", "neutral")
-                        sprite_filename = EMOTION_SPRITE_MAP.get(emotion_key, "yuuka_neutral.png")
-                        
-                        # 웹소켓으로 데이터 전송
-                        await broadcast_to_clients({"text": dialogue_text, "sprite": sprite_filename})
-                    else:
-                        raise json.JSONDecodeError("No JSON object found", raw_response, 0)
+                print(f"Gemini 원본 응답: {raw_response}") # 디버깅을 위해 원본 응답 출력
 
-                except (json.JSONDecodeError, KeyError):
-                    # JSON 파싱 실패 시, 전체 텍스트를 일반 메시지로 전송
-                    print("JSON 파싱 실패. 일반 텍스트로 응답합니다.")
-                    await broadcast_to_clients({"text": raw_response, "sprite": "yuuka_neutral.png"})
-            
+                dialogue_text = raw_response
+                sprite_filename = EMOTION_SPRITE_MAP["neutral"] # 기본값 설정
+
+                # Gemini 응답에서 JSON을 안정적으로 추출
+                try:
+                    # 마크다운 ```json ... ``` 블록이 있는지 확인
+                    if "```json" in raw_response:
+                        json_str = raw_response.split("```json")[1].split("```")[0].strip()
+                    # 마크다운 블록이 없다면, 중괄호로만 찾아보기
+                    else:
+                        json_start = raw_response.find('{')
+                        json_end = raw_response.rfind('}') + 1
+                        if json_start != -1 and json_end > json_start:
+                            json_str = raw_response[json_start:json_end]
+                        else:
+                            raise ValueError("JSON 객체를 찾을 수 없습니다.")
+
+                    gemini_data = json.loads(json_str)
+                    dialogue_text = gemini_data.get("text", "...")
+                    emotion_key = gemini_data.get("emotion", "neutral")
+                    sprite_filename = EMOTION_SPRITE_MAP.get(emotion_key, EMOTION_SPRITE_MAP["neutral"])
+                
+                except (ValueError, json.JSONDecodeError, KeyError) as e:
+                    # JSON 파싱에 실패하면, 원본 텍스트 전체를 대화로 사용
+                    print(f"JSON 파싱 실패 ({e}). 일반 텍스트로 처리합니다.")
+                    dialogue_text = raw_response.replace("```json", "").replace("```", "").strip()
+
+                # 최종적으로 웹소켓으로 데이터 전송
+                await broadcast_to_clients({"text": dialogue_text, "sprite": sprite_filename})
+
             except Exception as e:
                 print(f"Gemini API 호출 중 심각한 오류 발생: {e}")
                 await message.channel.send(f"으앗, 선생님 죄송해요. 생각에 잠시 오류가 생긴 것 같아요: `{e}`")
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+# =========================================================
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 # 실행
 async def main():
