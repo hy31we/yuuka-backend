@@ -11,6 +11,7 @@ import glob
 import json
 import websockets
 from typing import Union
+from collections import defaultdict # 추가된 부분
 
 # .env 파일이 저장될 영구 디스크 경로 (Render 환경 변수에서 가져옴)
 # 로컬 테스트를 위해 기본값으로 '.env'를 사용합니다.
@@ -22,14 +23,17 @@ load_dotenv(dotenv_path=ENV_FILE_PATH)
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))  # 기본 활동 채널
+# ❗️ 새 환경 변수: 웹페이지의 기본 URL을 설정해야 합니다.
+# 예: "https://your-app-name.onrender.com"
+WEB_BASE_URL = os.getenv("WEB_BASE_URL")
 
-if not all([DISCORD_BOT_TOKEN, GEMINI_API_KEY]):
-    print("오류: 환경 변수 설정이 올바르지 않습니다. (DISCORD_BOT_TOKEN, GEMINI_API_KEY 필요)")
-    print("Render 배포 시에는 'Environment' 탭에서 환경 변수를 직접 설정해야 합니다.")
+
+if not all([DISCORD_BOT_TOKEN, GEMINI_API_KEY, WEB_BASE_URL]):
+    print("오류: 필수 환경 변수가 설정되지 않았습니다.")
+    print("필요한 변수: DISCORD_BOT_TOKEN, GEMINI_API_KEY, WEB_BASE_URL")
     # 로컬이 아닌 환경에서는 종료 처리
     if not os.path.exists(".env"):
         exit()
-
 
 def update_env_variable(key: str, value: str):
     """
@@ -38,7 +42,6 @@ def update_env_variable(key: str, value: str):
     lines = []
     found = False
     
-    # .env 파일이 저장될 디렉토리가 없으면 생성 (Render Persistent Disk)
     env_dir = os.path.dirname(ENV_FILE_PATH)
     if env_dir:
         os.makedirs(env_dir, exist_ok=True)
@@ -49,7 +52,6 @@ def update_env_variable(key: str, value: str):
 
     with open(ENV_FILE_PATH, "w", encoding="utf-8") as f:
         for line in lines:
-            # strip()을 사용하여 앞뒤 공백 제거 후 비교
             if line.strip().startswith(f"{key}="):
                 f.write(f"{key}={value}\n")
                 found = True
@@ -58,7 +60,6 @@ def update_env_variable(key: str, value: str):
         if not found:
             f.write(f"{key}={value}\n")
 
-    # .env 변경 사항을 현재 실행 중인 환경에 즉시 반영
     os.environ[key] = value
     print(f"'{ENV_FILE_PATH}' 파일에 {key}={value} 로 업데이트 완료 및 환경 변수 적용")
 
@@ -75,7 +76,14 @@ knowledge_cache = {}
 KNOWLEDGE_BASE_DIR = "knowledge_base"
 processing_lock = asyncio.Lock()
 chat_sessions = {}
-connected_clients = set()
+
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ===================== 수정된 코드 블록 =====================
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# 서버 ID(guild_id)를 키로 사용하여 웹소켓 클라이언트 집합을 관리
+clients_by_guild = defaultdict(set)
+# 웹소켓 객체를 키로 사용하여 서버 ID를 추적 (연결 종료 시 정리용)
+client_to_guild = {}
 
 # 감정 키워드 매핑
 EMOTION_SPRITE_MAP = {
@@ -89,21 +97,56 @@ EMOTION_SPRITE_MAP = {
     "angry2": "yuuka_angry2.png",
 }
 
-# 웹소켓 관련 함수
-async def broadcast_to_clients(message_data):
-    if connected_clients:
-        message_json = json.dumps(message_data)
-        await asyncio.gather(*[client.send(message_json) for client in connected_clients])
-        print(f"웹소켓 클라이언트로 데이터 전송: {message_json}")
+# 웹소켓 관련 함수 (서버 ID 기반으로 변경)
+async def broadcast_to_clients(guild_id: str, message_data: dict):
+    """지정된 서버 ID에 연결된 모든 클라이언트에게 메시지를 전송합니다."""
+    if guild_id in clients_by_guild:
+        clients = clients_by_guild[guild_id]
+        if clients:
+            message_json = json.dumps(message_data)
+            # asyncio.gather를 사용하여 동시에 여러 클라이언트에게 전송
+            await asyncio.gather(*[client.send(message_json) for client in clients])
+            print(f"서버 ID '{guild_id}'의 {len(clients)}개 클라이언트로 데이터 전송: {message_json}")
 
 async def websocket_handler(websocket):
-    connected_clients.add(websocket)
-    print(f"웹 클라이언트 연결됨: {websocket.remote_address}")
+    """웹 클라이언트 연결을 처리하고, 서버 ID에 따라 등록 및 관리합니다."""
+    print(f"웹 클라이언트 연결 시도: {websocket.remote_address}")
     try:
-        await websocket.wait_closed()
+        # 클라이언트로부터 첫 메시지(등록 정보)를 기다림
+        message = await websocket.recv()
+        data = json.loads(message)
+
+        # 등록 메시지인지, guild_id가 포함되어 있는지 확인
+        if data.get("type") == "register" and "guild_id" in data:
+            guild_id = data["guild_id"]
+            clients_by_guild[guild_id].add(websocket)
+            client_to_guild[websocket] = guild_id
+            print(f"클라이언트 {websocket.remote_address}가 서버 ID '{guild_id}'에 등록되었습니다.")
+            
+            # 연결이 끊길 때까지 대기
+            await websocket.wait_closed()
+        else:
+            # 첫 메시지가 유효한 등록 정보가 아니면 연결 종료
+            print(f"잘못된 등록 메시지 수신. 연결을 닫습니다: {message}")
+            await websocket.close()
+
+    except (websockets.exceptions.ConnectionClosedError, json.JSONDecodeError, KeyError) as e:
+        print(f"클라이언트 등록 중 오류 또는 연결 종료: {e}")
     finally:
-        connected_clients.remove(websocket)
-        print(f"웹 클라이언트 연결 끊김: {websocket.remote_address}")
+        # 클라이언트 연결 종료 시, 관리 목록에서 제거
+        if websocket in client_to_guild:
+            guild_id = client_to_guild[websocket]
+            clients_by_guild[guild_id].remove(websocket)
+            # 해당 서버에 더 이상 연결된 클라이언트가 없으면 키 삭제
+            if not clients_by_guild[guild_id]:
+                del clients_by_guild[guild_id]
+            del client_to_guild[websocket]
+            print(f"서버 ID '{guild_id}'에서 클라이언트 연결 해제됨: {websocket.remote_address}")
+        else:
+            print(f"등록되지 않은 클라이언트 연결 해제됨: {websocket.remote_address}")
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+# =========================================================
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 # Knowledge Base 로딩
 def load_knowledge_base():
@@ -111,12 +154,9 @@ def load_knowledge_base():
     knowledge_cache = {}
     
     file_patterns = [
-        f"{KNOWLEDGE_BASE_DIR}/*.txt", 
-        f"{KNOWLEDGE_BASE_DIR}/*.md",
-        f"{KNOWLEDGE_BASE_DIR}/*.png",
-        f"{KNOWLEDGE_BASE_DIR}/*.jpg",
-        f"{KNOWLEDGE_BASE_DIR}/*.jpeg",
-        f"{KNOWLEDGE_BASE_DIR}/*.webp"
+        f"{KNOWLEDGE_BASE_DIR}/*.txt", f"{KNOWLEDGE_BASE_DIR}/*.md",
+        f"{KNOWLEDGE_BASE_DIR}/*.png", f"{KNOWLEDGE_BASE_DIR}/*.jpg",
+        f"{KNOWLEDGE_BASE_DIR}/*.jpeg", f"{KNOWLEDGE_BASE_DIR}/*.webp"
     ]
     files_to_load = []
     for pattern in file_patterns:
@@ -143,7 +183,7 @@ def load_knowledge_base():
 
 # Gemini 설정
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=GEM_PROMPT)
+model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=GEM_PROMPT)
 
 # Discord 봇 기본 설정
 intents = discord.Intents.default()
@@ -160,19 +200,15 @@ async def on_ready():
     except Exception as e:
         print(f"명령어 동기화 실패: {e}")
     
-    # on_ready 시점에서 CHANNEL_ID를 다시 로드
     global CHANNEL_ID
     CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
     print(f'-----------------------------------------\n봇이 채널 ID {CHANNEL_ID}에서 메시지를 기다리고 있습니다.')
 
 
-# ✅ /채널지정 명령어 (텍스트 or 음성 채널 모두 가능)
-@bot.tree.command(name="채널지정", description="유우카가 활동할 채널(텍스트 또는 음성)을 지정합니다.")
+# ✅ /채널지정 명령어
+@bot.tree.command(name="채널지정", description="유우카가 활동할 채널을 지정합니다.")
 @app_commands.checks.has_permissions(administrator=True)
-async def set_channel(
-    interaction: discord.Interaction,
-    channel: Union[discord.TextChannel, discord.VoiceChannel]
-):
+async def set_channel(interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.VoiceChannel]):
     global CHANNEL_ID
     CHANNEL_ID = channel.id
     update_env_variable("CHANNEL_ID", str(CHANNEL_ID))
@@ -194,7 +230,7 @@ async def reset_conversation(interaction: discord.Interaction):
     current_channel_id = int(os.getenv("CHANNEL_ID", "0"))
     if interaction.channel.id != current_channel_id:
         await interaction.response.send_message(
-            f"이 명령어는 지정된 채널에서만 사용할 수 있어요. (<#{current_channel_id}>로 이동해주세요!)",
+            f"이 명령어는 지정된 채널(<#{current_channel_id}>)에서만 사용할 수 있어요.",
             ephemeral=True
         )
         return
@@ -202,9 +238,7 @@ async def reset_conversation(interaction: discord.Interaction):
     guild_id = interaction.guild.id
     chat_sessions[guild_id] = model.start_chat(history=[])
     print(f"관리자({interaction.user})가 대화를 초기화했습니다. (서버: {interaction.guild.name})")
-    await interaction.response.send_message(
-        f"{interaction.user.mention} 알겠습니다! 새로운 대화를 시작할게요 ✨"
-    )
+    await interaction.response.send_message(f"{interaction.user.mention} 알겠습니다! 새로운 대화를 시작할게요 ✨")
 
 # ✅ /지식갱신 명령어
 @bot.tree.command(name="지식갱신", description="Knowledge Base 폴더의 파일들을 다시 불러옵니다.")
@@ -212,7 +246,7 @@ async def reload_knowledge(interaction: discord.Interaction):
     current_channel_id = int(os.getenv("CHANNEL_ID", "0"))
     if interaction.channel.id != current_channel_id:
         await interaction.response.send_message(
-            f"이 명령어는 지정된 채널에서만 사용할 수 있어요. (<#{current_channel_id}>로 이동해주세요!)",
+            f"이 명령어는 지정된 채널(<#{current_channel_id}>)에서만 사용할 수 있어요.",
             ephemeral=True
         )
         return
@@ -221,6 +255,26 @@ async def reload_knowledge(interaction: discord.Interaction):
     print(f"{interaction.user}님이 지식 베이스를 새로고침했습니다. (서버: {interaction.guild.name})")
     load_knowledge_base()
     await interaction.followup.send(f"지식 파일들을 새로고침했어요! ({len(knowledge_cache)}개 파일 로드됨)")
+
+# ✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
+# ===================== 새로운 명령어 =====================
+# ✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
+@bot.tree.command(name="주소", description="이 서버의 대화를 볼 수 있는 웹페이지 주소를 안내합니다.")
+async def get_address(interaction: discord.Interaction):
+    guild_id = interaction.guild.id
+    # index.html 파일이 기본 경로에 있다고 가정
+    page_url = f"{WEB_BASE_URL}/index.html?guild_id={guild_id}"
+    
+    embed = discord.Embed(
+        title="샬레 집무실 주소",
+        description=f"안녕하세요, 선생님! 이 서버의 대화는 아래의 전용 주소에서 실시간으로 확인할 수 있어요.",
+        color=0x5dadec # 블루 아카이브 테마 색상
+    )
+    embed.add_field(name="URL", value=f"[여기를 클릭하여 집무실로 이동]({page_url})", inline=False)
+    embed.set_footer(text="이 주소는 현재 서버에만 해당돼요!")
+    
+    # ephemeral=True : 명령어를 실행한 사용자에게만 보이게 설정
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 # ===================== 수정된 코드 블록 =====================
@@ -233,14 +287,19 @@ async def on_message(message):
     current_channel_id = int(os.getenv("CHANNEL_ID", "0"))
     if message.channel.id != current_channel_id:
         return
+    
+    # 메시지가 발생한 서버의 ID
+    guild_id = message.guild.id
+    guild_id_str = str(guild_id)
 
-    if not connected_clients:
-        await message.channel.send("앗, 선생님. 웹페이지와 연결되어 있지 않아요. index.html을 열어주세요!")
-        print("웹 클라이언트 없음 — 메시지 처리 중단.")
+    # 이 서버에 연결된 웹 클라이언트가 없으면 응답하지 않음
+    if guild_id_str not in clients_by_guild:
+        print(f"서버 ID '{guild_id_str}'에 연결된 웹 클라이언트 없음 — 메시지 처리 중단.")
+        # 아래 주석을 해제하면, 웹이 연결 안 되었을 때 디스코드에 안내 메시지를 보냅니다.
+        # await message.channel.send(f"앗, 선생님. 이 서버({message.guild.name})에 연결된 웹페이지가 없는 것 같아요. `/주소` 명령어로 전용 주소를 확인해주세요!", delete_after=10)
         return
 
     async with processing_lock:
-        guild_id = message.guild.id
         if guild_id not in chat_sessions:
             chat_sessions[guild_id] = model.start_chat(history=[])
 
@@ -279,17 +338,14 @@ async def on_message(message):
             try:
                 response = await asyncio.to_thread(current_session.send_message, prompt_parts)
                 raw_response = response.text
-                print(f"Gemini 원본 응답: {raw_response}") # 디버깅을 위해 원본 응답 출력
+                print(f"Gemini 원본 응답: {raw_response}")
 
                 dialogue_text = raw_response
-                sprite_filename = EMOTION_SPRITE_MAP["neutral"] # 기본값 설정
+                sprite_filename = EMOTION_SPRITE_MAP["neutral"]
 
-                # Gemini 응답에서 JSON을 안정적으로 추출
                 try:
-                    # 마크다운 ```json ... ``` 블록이 있는지 확인
                     if "```json" in raw_response:
                         json_str = raw_response.split("```json")[1].split("```")[0].strip()
-                    # 마크다운 블록이 없다면, 중괄호로만 찾아보기
                     else:
                         json_start = raw_response.find('{')
                         json_end = raw_response.rfind('}') + 1
@@ -304,12 +360,11 @@ async def on_message(message):
                     sprite_filename = EMOTION_SPRITE_MAP.get(emotion_key, EMOTION_SPRITE_MAP["neutral"])
                 
                 except (ValueError, json.JSONDecodeError, KeyError) as e:
-                    # JSON 파싱에 실패하면, 원본 텍스트 전체를 대화로 사용
                     print(f"JSON 파싱 실패 ({e}). 일반 텍스트로 처리합니다.")
                     dialogue_text = raw_response.replace("```json", "").replace("```", "").strip()
-
-                # 최종적으로 웹소켓으로 데이터 전송
-                await broadcast_to_clients({"text": dialogue_text, "sprite": sprite_filename})
+                
+                # 수정된 부분: 현재 서버 ID와 함께 메시지 데이터를 전송
+                await broadcast_to_clients(guild_id_str, {"text": dialogue_text, "sprite": sprite_filename})
 
             except Exception as e:
                 print(f"Gemini API 호출 중 심각한 오류 발생: {e}")
@@ -320,22 +375,14 @@ async def on_message(message):
 
 # 실행
 async def main():
-    # Render가 제공하는 PORT 환경 변수를 사용. 없으면 8765를 기본값으로 사용.
     port = int(os.environ.get("PORT", 8765))
     
-    # 웹소켓 서버 시작
-    websocket_server = await websockets.serve(websocket_handler, "0.0.0.0", port)
-    print(f"웹소켓 서버가 ws://0.0.0.0:{port} 에서 시작되었습니다.")
-    
-    # 디스코드 봇 시작
-    await bot.start(DISCORD_BOT_TOKEN)
-    
-    # 서버가 계속 실행되도록 유지
-    await websocket_server.wait_closed()
+    async with websockets.serve(websocket_handler, "0.0.0.0", port):
+        print(f"웹소켓 서버가 ws://0.0.0.0:{port} 에서 시작되었습니다.")
+        await bot.start(DISCORD_BOT_TOKEN)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-
         print("\n봇을 종료합니다.")
