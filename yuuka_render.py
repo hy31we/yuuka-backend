@@ -207,7 +207,7 @@ async def on_ready():
 
 # ✅ /채널지정 명령어
 @bot.tree.command(name="채널지정", description="유우카가 활동할 채널을 지정합니다.")
-@app_commands.checks.has_permissions(administrator=True)
+# @app_commands.checks.has_permissions(administrator=True)
 async def set_channel(interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.VoiceChannel]):
     global CHANNEL_ID
     CHANNEL_ID = channel.id
@@ -387,3 +387,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print("\n봇을 종료합니다.")
+
