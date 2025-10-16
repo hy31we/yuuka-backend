@@ -177,7 +177,7 @@ def load_knowledge_base():
 
 # Gemini 설정
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=GEM_PROMPT)
+model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=GEM_PROMPT)
 
 # Discord 봇 기본 설정
 intents = discord.Intents.default()
@@ -374,4 +374,5 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
+
         print("\n봇을 종료합니다.")
