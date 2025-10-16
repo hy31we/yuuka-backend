@@ -11,7 +11,7 @@ import glob
 import json
 import websockets
 from typing import Union
-from collections import defaultdict # 추가된 부분
+from collections import defaultdict
 
 # .env 파일이 저장될 영구 디스크 경로 (Render 환경 변수에서 가져옴)
 # 로컬 테스트를 위해 기본값으로 '.env'를 사용합니다.
@@ -77,9 +77,6 @@ KNOWLEDGE_BASE_DIR = "knowledge_base"
 processing_lock = asyncio.Lock()
 chat_sessions = {}
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-# ===================== 수정된 코드 블록 =====================
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 # 서버 ID(guild_id)를 키로 사용하여 웹소켓 클라이언트 집합을 관리
 clients_by_guild = defaultdict(set)
 # 웹소켓 객체를 키로 사용하여 서버 ID를 추적 (연결 종료 시 정리용)
@@ -144,9 +141,6 @@ async def websocket_handler(websocket):
             print(f"서버 ID '{guild_id}'에서 클라이언트 연결 해제됨: {websocket.remote_address}")
         else:
             print(f"등록되지 않은 클라이언트 연결 해제됨: {websocket.remote_address}")
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-# =========================================================
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 # Knowledge Base 로딩
 def load_knowledge_base():
@@ -183,7 +177,7 @@ def load_knowledge_base():
 
 # Gemini 설정
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash', system_instruction=GEM_PROMPT)
+model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=GEM_PROMPT)
 
 # Discord 봇 기본 설정
 intents = discord.Intents.default()
@@ -207,7 +201,6 @@ async def on_ready():
 
 # ✅ /채널지정 명령어
 @bot.tree.command(name="채널지정", description="유우카가 활동할 채널을 지정합니다.")
-# @app_commands.checks.has_permissions(administrator=True)
 async def set_channel(interaction: discord.Interaction, channel: Union[discord.TextChannel, discord.VoiceChannel]):
     global CHANNEL_ID
     CHANNEL_ID = channel.id
@@ -256,9 +249,7 @@ async def reload_knowledge(interaction: discord.Interaction):
     load_knowledge_base()
     await interaction.followup.send(f"지식 파일들을 새로고침했어요! ({len(knowledge_cache)}개 파일 로드됨)")
 
-# ✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
-# ===================== 새로운 명령어 =====================
-# ✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨✨
+# ✅ /주소 명령어
 @bot.tree.command(name="주소", description="이 서버의 대화를 볼 수 있는 웹페이지 주소를 안내합니다.")
 async def get_address(interaction: discord.Interaction):
     guild_id = interaction.guild.id
@@ -276,9 +267,7 @@ async def get_address(interaction: discord.Interaction):
     # ephemeral=True : 명령어를 실행한 사용자에게만 보이게 설정
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-# ===================== 수정된 코드 블록 =====================
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# ❗️ 최종 수정된 on_message 함수
 @bot.event
 async def on_message(message):
     if message.author == bot.user or not message.guild:
@@ -288,15 +277,11 @@ async def on_message(message):
     if message.channel.id != current_channel_id:
         return
     
-    # 메시지가 발생한 서버의 ID
     guild_id = message.guild.id
     guild_id_str = str(guild_id)
 
-    # 이 서버에 연결된 웹 클라이언트가 없으면 응답하지 않음
     if guild_id_str not in clients_by_guild:
         print(f"서버 ID '{guild_id_str}'에 연결된 웹 클라이언트 없음 — 메시지 처리 중단.")
-        # 아래 주석을 해제하면, 웹이 연결 안 되었을 때 디스코드에 안내 메시지를 보냅니다.
-        # await message.channel.send(f"앗, 선생님. 이 서버({message.guild.name})에 연결된 웹페이지가 없는 것 같아요. `/주소` 명령어로 전용 주소를 확인해주세요!", delete_after=10)
         return
 
     async with processing_lock:
@@ -340,10 +325,12 @@ async def on_message(message):
                 raw_response = response.text
                 print(f"Gemini 원본 응답: {raw_response}")
 
-                dialogue_text = raw_response
-                sprite_filename = EMOTION_SPRITE_MAP["neutral"]
+                dialogue_text = ""
+                sprite_filename = EMOTION_SPRITE_MAP["neutral"] # 기본값 설정
 
                 try:
+                    # 1. 응답에서 JSON 문자열 부분만 정확히 추출
+                    json_str = ""
                     if "```json" in raw_response:
                         json_str = raw_response.split("```json")[1].split("```")[0].strip()
                     else:
@@ -351,27 +338,29 @@ async def on_message(message):
                         json_end = raw_response.rfind('}') + 1
                         if json_start != -1 and json_end > json_start:
                             json_str = raw_response[json_start:json_end]
-                        else:
-                            raise ValueError("JSON 객체를 찾을 수 없습니다.")
 
-                    gemini_data = json.loads(json_str)
-                    dialogue_text = gemini_data.get("text", "...")
-                    emotion_key = gemini_data.get("emotion", "neutral")
-                    sprite_filename = EMOTION_SPRITE_MAP.get(emotion_key, EMOTION_SPRITE_MAP["neutral"])
-                
-                except (ValueError, json.JSONDecodeError, KeyError) as e:
-                    print(f"JSON 파싱 실패 ({e}). 일반 텍스트로 처리합니다.")
+                    # 2. 추출된 문자열이 있다면 JSON으로 파싱
+                    if json_str:
+                        gemini_data = json.loads(json_str)
+                        dialogue_text = gemini_data.get("text", "...")
+                        emotion_key = gemini_data.get("emotion", "neutral")
+                        sprite_filename = EMOTION_SPRITE_MAP.get(emotion_key, EMOTION_SPRITE_MAP["neutral"])
+                    else:
+                        # 3. JSON 구조를 찾지 못하면, 원본 응답을 일반 텍스트로 사용
+                        print("JSON 구조를 찾지 못했습니다. 일반 텍스트로 처리합니다.")
+                        dialogue_text = raw_response.strip()
+
+                except (json.JSONDecodeError, KeyError) as e:
+                    # 4. JSON 파싱에 실패하면, 원본 응답을 정리하여 일반 텍스트로 사용
+                    print(f"JSON 파싱 실패 ({e}). 응답을 일반 텍스트로 처리합니다.")
                     dialogue_text = raw_response.replace("```json", "").replace("```", "").strip()
                 
-                # 수정된 부분: 현재 서버 ID와 함께 메시지 데이터를 전송
+                # 최종적으로 정리된 데이터를 클라이언트로 전송
                 await broadcast_to_clients(guild_id_str, {"text": dialogue_text, "sprite": sprite_filename})
 
             except Exception as e:
                 print(f"Gemini API 호출 중 심각한 오류 발생: {e}")
                 await message.channel.send(f"으앗, 선생님 죄송해요. 생각에 잠시 오류가 생긴 것 같아요: `{e}`")
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-# =========================================================
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 # 실행
 async def main():
@@ -385,6 +374,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-
         print("\n봇을 종료합니다.")
-
